@@ -1,0 +1,144 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v3
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Instalar dependências
+        run: npm install
+
+  build:
+    name: Build and Push
+    needs: test
+    runs-on: ubuntu-latest
+    outputs: 
+      docker_tag: ${{ steps.generate_tag.outputs.sha }}
+    
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+
+      - name: Generate Tag
+        id: generate_tag
+            
+        run: |
+          SHA=$(echo $GITHUB_SHA | head -c7)
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+
+      - name: Login no Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.BMI_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.BMI_DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t ${{ secrets.BMI_DOCKERHUB_USERNAME }}/bmi-calculator:${{ steps.generate_tag.outputs.sha }} -f Dockerfile.api .
+          docker push ${{ secrets.BMI_DOCKERHUB_USERNAME }}/bmi-calculator:${{ steps.generate_tag.outputs.sha }}
+          
+      
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Copy Dockerfile via SSH
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST_BMISERVER }}
+          username: ${{ secrets.USERNAME_BMISERVER }}
+          password: ${{ secrets.PASSWORD_BMISERVER }}
+          source: "Dockerfile.api"
+          target: "~/"
+
+      - name: Copy docker-compose file via SSH
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST_BMISERVER }}
+          username: ${{ secrets.USERNAME_BMISERVER }}
+          password: ${{ secrets.PASSWORD_BMISERVER }}
+          source: "docker-compose.yaml"
+          target: "~/"
+
+      - name: Copy package.json file via SSH
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST_BMISERVER }}
+          username: ${{ secrets.USERNAME_BMISERVER }}
+          password: ${{ secrets.PASSWORD_BMISERVER }}
+          source: "package.json"
+          target: "~/"
+
+      - name: Copy src directory via SSH
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST_BMISERVER }}
+          username: ${{ secrets.USERNAME_BMISERVER }}
+          password: ${{ secrets.PASSWORD_BMISERVER }}
+          source: "src"
+          target: "~/"
+          
+      - name: Copy init.sql file via SSH
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST_BMISERVER }}
+          username: ${{ secrets.USERNAME_BMISERVER }}
+          password: ${{ secrets.PASSWORD_BMISERVER }}
+          source: "init.sql"
+          target: "~/"     
+    
+      - name: Deploy to DigitalOcean Droplet
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.HOST_BMISERVER }}
+          username: ${{ secrets.USERNAME_BMISERVER }}
+          password: ${{ secrets.PASSWORD_BMISERVER }}
+          script: |
+            # Extract the tag on job build
+              TAG=${{ needs.build.outputs.docker_tag }}
+              # Create env file
+              [ -e .env ] && rm .env
+              touch .env
+              chmod 644 .env
+              echo "DOCKER_IMAGE_TAG=$TAG" > .env
+              # Login Docker
+              docker login -u ${{ secrets.BMI_DOCKERHUB_USERNAME}} -p ${{ secrets.BMI_DOCKERHUB_TOKEN }}
+              # Stop Containers
+              CONTAINERS=$(docker ps -q)
+              if [ -n "$CONTAINERS" ]; then
+                docker stop $CONTAINERS
+              else
+                echo " No running containers"
+              fi
+              # Remove Old Containers
+              CONTAINERS=$(docker ps -a -q)
+              if [ -n "$CONTAINERS" ]; then
+                docker rm $CONTAINERS
+              else
+                echo " No containers to remove"
+              fi
+              # Run a new container from a new image
+              docker-compose -f docker-compose.yaml up -d --build
+
