@@ -22,7 +22,6 @@ services:
     image: mysql:9.1.0
     container_name: bmi-calculator-database
     environment:
-      MYSQL_HOST: database
       MYSQL_USER: bmi_calculator
       MYSQL_PASSWORD: 12345678
       MYSQL_ROOT_PASSWORD: 12345678
